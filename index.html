@@ -1,3 +1,60 @@
-<!doctype html>
+cat > index.html <<'HTML'
+<!DOCTYPE html>
+<html>
+<head>
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+
 <title>Kasus Chat</title>
-<h1>123</h1>
+<link rel="icon" type="image/x-icon" href="icon.ico">
+
+<link rel="stylesheet" href="style.css">
+
+</head>
+
+<body>
+
+<div id="login">
+<h2>Enter Password</h2>
+<input id="password" type="password">
+<button onclick="login()">Enter</button>
+</div>
+
+<div id="app" style="display:none;">
+  <h1>Kasus Chat</h1>
+  
+  <div id="onlineCount">0 users online</div>
+
+  <div id="quoteBox">
+<h3>Quote of the Day</h3>
+
+<p id="quoteText">
+Indtil videre, ingen ny quote...
+</p>
+
+<a href="quotes.html" class="quote-link">Previous quotes →</a>
+
+</div>
+
+  <div id="chat"></div>
+
+  <div id="typingIndicator"></div>
+
+<div id="inputBar">
+<input id="name" placeholder="Your name">
+<input id="message" placeholder="Message" oninput="userTyping()" onkeypress="if(event.key==='Enter') send()">
+<button onclick="send()">Send</button>
+</div>
+
+<div id="uploadArea">
+Drag & drop image here or click to upload
+<input type="file" id="imageInput" accept="image/*">
+</div>
+
+</div>
+
+<script type="module" src="script.js"></script>
+
+</body>
+</html>
+HTML
