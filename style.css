@@ -1,0 +1,149 @@
+cat > style.css <<'CSS'
+#name{
+width:120px;
+}
+
+#message{
+flex:1;
+max-width:305px;
+}
+
+button{
+width:90px;
+padding:10px;
+}
+
+body{
+font-family: Arial;
+background:#111;
+color:white;
+text-align:center;
+margin:0;
+overflow-x:hidden;
+}
+
+#app{
+max-width:900px;
+margin:auto;
+padding:20px;
+padding-right:0px;
+}
+
+#inputBar{
+display:flex;
+justify-content:center;
+align-items:center;
+gap:10px;
+margin-top:10px;
+flex-wrap:wrap;
+}
+
+#chat{
+width:100%;
+max-width:600px;
+margin:20px auto;
+height:300px;
+overflow-y:auto;
+border:1px solid #444;
+padding:10px;
+box-sizing:border-box;
+}
+
+input{
+padding:10px;
+margin:5px;
+}
+
+#quoteBox{
+position:fixed;
+top:138px;
+right:50px;
+width:220px;
+background:#1b1b1b;
+border:1px solid #444;
+padding:15px;
+border-radius:8px;
+text-align:left;
+}
+
+.quote-link {
+  font-size: 13px;
+  color: #aaa;
+  text-decoration: none;
+  padding: 5px 8px;
+  border-radius: 5px;
+  transition: 0.2s;
+}
+
+.quote-link:hover {
+  background: #1a1d23;
+  color: white;
+}
+
+#quoteBox h3{
+margin-top:0;
+font-size:18px;
+}
+
+#quoteText{
+font-style:italic;
+}
+
+#typingIndicator{
+height:20px;
+color:#aaa;
+font-style:italic;
+margin-bottom:10px;
+}
+
+#quoteHistory{
+max-height:120px;
+overflow-y:auto;
+}
+
+@media (max-width:700px){
+
+#quoteBox{
+display:none;
+position:static;
+width:100%;
+margin:20px 0;
+}
+
+#chat{
+height:300px;
+}
+
+#inputBar{
+flex-direction:column;
+}
+
+#name,#message{
+width:90%;
+max-width:none;
+}
+
+button{
+width:120px;
+}
+
+}
+
+#uploadArea{
+border:2px dashed #555;
+padding:10px;
+margin:15px auto;
+max-width:400px;
+border-radius:10px;
+color:#aaa;
+cursor:pointer;
+}
+
+#uploadArea:hover{
+border-color:#888;
+}
+
+#imageInput{
+display:none;
+}
+CSS
