@@ -430,23 +430,6 @@ window.login = login;
 
 //const ADMIN_PASSWORD = "bertilsbareboller";
 
-const statusRef = ref(db,"siteStatus/online");
-
-onValue(statusRef,(snapshot)=>{
-
-let online = snapshot.val();
-
-if(!online){
-
-document.body.innerHTML = `
-<h1>Chat is currently offline</h1>
-<p>Maintenance in progress</p>
-`;
-
-}
-
-});
-
 function banUser(uid, reason="Rule violation", durationMinutes=null){
 
 if(!window.isAdmin) return;
