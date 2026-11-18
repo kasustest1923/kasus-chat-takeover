@@ -416,4 +416,122 @@ function formatTime(ts) {
 function loadAllMessages() {
   const box = document.getElementById("chat");
   onValue(chat, (snap) => {
-    box.replace
+    box.replaceChildren();
+    snap.forEach((child) => {
+      const m = child.val() || {};
+      const div = document.createElement("div");
+      div.appendChild(document.createTextNode("[" + formatTime(m.timestamp) + "] "));
+      const b = document.createElement("b");
+      b.textContent = String(m.name || "Unknown");
+      div.appendChild(b);
+      if (window.isAdmin && m.uid) {
+        const s = document.createElement("span");
+        s.style.cssText = "color:#888;font-size:11px";
+        s.textContent = " (" + m.uid + ")";
+        div.appendChild(s);
+      }
+      div.appendChild(document.createTextNode(": "));
+      const c = String(m.message || "");
+      let url = null;
+      try { const u = new URL(c); if (u.protocol === "https:" && u.hostname === "i.ibb.co") url = u.href; } catch (e) {}
+      if (url) {
+        const img = document.createElement("img");
+        img.src = url; img.alt = "Chat image"; img.loading = "lazy";
+        img.style.cssText = "max-width:250px;border-radius:6px;margin-top:5px";
+        div.appendChild(document.createElement("br"));
+        div.appendChild(img);
+      } else div.appendChild(document.createTextNode(c));
+      box.appendChild(div);
+    });
+    box.scrollTop = box.scrollHeight;
+  });
+}
+
+let typingUsers = {};
+onValue(typingRef, (snap) => {
+  const me = document.getElementById("name").value;
+  typingUsers = {};
+  snap.forEach(ch => {
+    const i = ch.val();
+    if (!i.user || i.user === me) return;
+    if (Date.now() - i.time < 2500) typingUsers[i.user] = true;
+    else remove(ref(db, "typing/" + i.user));
+  });
+  const el = document.getElementById("typingIndicator");
+  const u = Object.keys(typingUsers);
+  el.innerText = !u.length ? "" : u.length === 1 ? u[0] + " is typing..." : u.join(", ") + " are typing...";
+});
+
+async function login() {
+  if (await checkBan()) return;
+  const hash = await sha256(document.getElementById("password").value);
+
+  if (hash === PASSWORD_HASH || hash === ADMIN_HASH) {
+    document.getElementById("login").style.display = "none";
+    document.getElementById("app").style.display = "block";
+    window.isAdmin = hash === ADMIN_HASH;
+    rotate(lvl >= 2);
+    startPresence();
+    loadAllMessages();
+    return;
+  }
+
+  if (hash === DURESS_HASH) {
+    document.open();
+    document.write(`<html><head><title>404</title></head><body><h1>404</h1>
+      <p>This page could not be found.</p></body></html>`);
+    document.close();
+    dot = null; makeDot();
+    return;
+  }
+  alert("Wrong password");
+}
+window.login = login;
+
+function banUser(uid, reason = "Rule violation", durationMinutes = null) {
+  if (!window.isAdmin || uid === OWNER_UID) return;
+  set(ref(db, "moderation/banned/" + uid), {
+    reason, expires: durationMinutes ? Date.now() + durationMinutes * 60000 : null
+  });
+}
+function unbanUser(uid) { if (window.isAdmin) remove(ref(db, "moderation/banned/" + uid)); }
+window.banUser = banUser;
+window.unbanUser = unbanUser;
+
+function toggleQuotes() {
+  const b = document.getElementById("quoteHistory");
+  b.style.display = b.style.display === "none" ? "block" : "none";
+}
+window.toggleQuotes = toggleQuotes;
+
+const uploadArea = document.getElementById("uploadArea");
+const imageInput = document.getElementById("imageInput");
+uploadArea.onclick = () => imageInput.click();
+uploadArea.addEventListener("dragover", e => { e.preventDefault(); uploadArea.style.borderColor = "#aaa"; });
+uploadArea.addEventListener("dragleave", () => { uploadArea.style.borderColor = "#555"; });
+uploadArea.addEventListener("drop", e => {
+  e.preventDefault(); uploadArea.style.borderColor = "#555"; uploadImage(e.dataTransfer.files[0]);
+});
+imageInput.addEventListener("change", () => uploadImage(imageInput.files[0]));
+
+function uploadImage(file) {
+  if (!file) return;
+  const fd = new FormData();
+  fd.append("image", file);
+  fetch("https://api.imgbb.com/1/upload?key=e48b7e0f6d197cb14a1d7f5508fadfef", { method: "POST", body: fd })
+    .then(r => r.json())
+    .then(d => push(chat, {
+      uid: currentUID,
+      name: document.getElementById("name").value,
+      message: d.data.url,
+      timestamp: Date.now()
+    }));
+}
+
+/* ============================================================
+   BOOT
+   ============================================================ */
+
+makeDot();
+trapBack();
+setLevel(START);
