@@ -1,0 +1,551 @@
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+import { getDatabase, ref, push, onChildAdded, remove, onValue, set, onDisconnect, get } 
+from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyCl_6vsYoZkEBMUNf0P4CK01hKCwA5P0XQ",
+  authDomain: "kasuschat.firebaseapp.com",
+  databaseURL: "https://kasuschat-default-rtdb.europe-west1.firebasedatabase.app",
+  projectId: "kasuschat",
+  storageBucket: "kasuschat.firebasestorage.app",
+  messagingSenderId: "953505535371",
+  appId: "1:953505535371:web:0d44f20017bc8664948b8e"
+};
+
+// --- Persistent UID for the device/browser ---
+let currentUID = localStorage.getItem("chatUID");
+
+if (!currentUID) {
+    currentUID = crypto.randomUUID();
+    localStorage.setItem("chatUID", currentUID);
+}
+
+// Firebase start
+const app = initializeApp(firebaseConfig);
+const db = getDatabase(app);
+
+// Ban checker
+async function checkBan(){
+
+const banRef = ref(db,"moderation/banned/"+currentUID);
+
+const snapshot = await get(banRef);
+
+if(snapshot.exists()){
+
+const banInfo = snapshot.val();
+const now = Date.now();
+
+if(!banInfo.expires || banInfo.expires > now){
+
+window.location.href = "banned.html?reason=" + encodeURIComponent(banInfo.reason || "Banned");
+return true;
+
+}else{
+
+remove(banRef);
+
+}
+
+}
+
+return false;
+
+}
+
+const OWNER_UID = "32df7477-c156-4968-9fd5-73b0bbcec9aa";
+
+function startPresence(){
+
+const onlineRef = ref(db,"onlineUsers");
+
+const tabId = crypto.randomUUID();
+
+const myOnlineRef = ref(db,"onlineUsers/"+tabId);
+
+// mark online
+set(myOnlineRef,true);
+
+// remove when tab closes
+onDisconnect(myOnlineRef).remove();
+
+// track focus
+document.addEventListener("visibilitychange",()=>{
+
+if(document.hidden){
+set(myOnlineRef,false);
+}else{
+set(myOnlineRef,true);
+}
+
+});
+
+// count users
+onValue(onlineRef,(snapshot)=>{
+
+let count = 0;
+
+snapshot.forEach((child)=>{
+if(child.val() === true){
+count++;
+}
+});
+
+document.getElementById("onlineCount").innerText =
+count + (count === 1 ? " user online" : " users online")
+
+});
+
+}
+
+let lastTypingTime = 0;
+
+// User is typing ref
+const typingRef = ref(db,"typing");
+
+// ASK FOR NOTIFICATION PERMISSION
+if ("Notification" in window) {
+
+if (Notification.permission !== "granted") {
+Notification.requestPermission();
+}
+
+}
+
+const chat = ref(db, "messages");
+
+function userTyping(){
+
+let name = document.getElementById("name").value;
+
+if(name.trim() === "") return;
+
+let now = Date.now();
+
+if(now - lastTypingTime < 1500) return;
+
+lastTypingTime = now;
+
+set(ref(db,"typing/" + name),{
+user: name,
+time: now
+});
+
+}
+
+window.userTyping = userTyping;
+
+
+function send(){
+
+let name = document.getElementById("name").value;
+let message = document.getElementById("message").value;
+
+if(message.trim() === "") return;
+if(name.trim() === "") return;
+
+let time = Date.now();
+
+// check admin command
+if(message.startsWith("/clear")){
+
+let parts = message.split(" ");
+let pass = parts[1];
+
+if(pass === ADMIN_PASSWORD){
+
+remove(chat).then(()=>{
+document.getElementById("chat").innerHTML = "";
+});
+
+}else{
+alert("Wrong admin password");
+}
+
+document.getElementById("message").value="";
+return;
+
+}
+
+push(chat,{
+    uid: currentUID,   // store UID for admin
+    name: name,        // user-chosen display name
+    message: message,
+    timestamp: time
+});
+
+// stop typing indicator after sending
+remove(ref(db,"typing/" + name));
+
+document.getElementById("message").value="";
+
+}
+
+
+function loadAllMessages(){
+
+  const chatBox = document.getElementById("chat");
+
+  chatBox.replaceChildren();
+
+  onValue(chat, (snapshot) => {
+
+    chatBox.replaceChildren();
+
+    snapshot.forEach((child) => {
+
+      const msg = child.val() || {};
+
+      const formattedTime = formatTime(msg.timestamp);
+      const div = document.createElement("div");
+
+      // Time
+      div.appendChild(
+        document.createTextNode("[" + formattedTime + "] ")
+      );
+
+      // Username — always plain text
+      const nameElement = document.createElement("b");
+      nameElement.textContent = String(msg.name || "Unknown");
+      div.appendChild(nameElement);
+
+      // UID for admins
+      if (window.isAdmin && msg.uid) {
+        const uidElement = document.createElement("span");
+        uidElement.style.color = "#888";
+        uidElement.style.fontSize = "11px";
+        uidElement.textContent = " (" + String(msg.uid) + ")";
+        div.appendChild(uidElement);
+      }
+
+      div.appendChild(document.createTextNode(": "));
+
+      const content = String(msg.message || "");
+
+      // Only display images from the expected ImgBB image host
+      let imageUrl = null;
+
+      try {
+        const parsedUrl = new URL(content);
+
+        if (
+          parsedUrl.protocol === "https:" &&
+          parsedUrl.hostname === "i.ibb.co"
+        ) {
+          imageUrl = parsedUrl.href;
+        }
+      } catch (error) {
+        // Not a valid URL: display as text
+      }
+
+      if (imageUrl) {
+        const image = document.createElement("img");
+        image.src = imageUrl;
+        image.alt = "Chat image";
+        image.style.maxWidth = "250px";
+        image.style.borderRadius = "6px";
+        image.style.marginTop = "5px";
+        image.loading = "lazy";
+
+        div.appendChild(document.createElement("br"));
+        div.appendChild(image);
+
+      } else {
+        // Never interpret message content as HTML
+        div.appendChild(document.createTextNode(content));
+      }
+
+      chatBox.appendChild(div);
+
+    });
+
+    chatBox.scrollTop = chatBox.scrollHeight;
+
+  });
+
+}
+
+
+onValue(chat,(snapshot)=>{
+
+if(!snapshot.exists()){
+document.getElementById("chat").innerHTML = "";
+}
+
+});
+
+let typingUsers = {};
+
+onValue(typingRef,(snapshot)=>{
+
+let myName = document.getElementById("name").value;
+typingUsers = {};
+
+snapshot.forEach((child)=>{
+
+let info = child.val();
+
+if(!info.user) return;
+
+if(info.user === myName) return;
+
+if(Date.now() - info.time < 2500){
+typingUsers[info.user] = true;
+}else{
+  remove(ref(db,"typing/" + info.user));
+}
+
+});
+
+updateTypingDisplay();
+
+});
+
+function updateTypingDisplay(){
+
+let users = Object.keys(typingUsers);
+
+if(users.length === 0){
+document.getElementById("typingIndicator").innerText = "";
+return;
+}
+
+if(users.length === 1){
+document.getElementById("typingIndicator").innerText =
+users[0] + " is typing...";
+return;
+}
+
+document.getElementById("typingIndicator").innerText =
+users.join(", ") + " are typing...";
+
+}
+
+window.send = send;
+
+const PASSWORD_HASH = "0d08f09ddf93c9c5dbe3f15cd2f022e900b6298b902627d61c18751911e96f38";
+const DURESS_PASSWORD_HASH = "8af6ecbdcdb3564c8cc2c2217992b4aafc3981aaeb450b6448a0b86d5bd4de02";
+
+async function sha256(text){
+
+const encoder = new TextEncoder();
+const data = encoder.encode(text);
+
+const hashBuffer = await crypto.subtle.digest("SHA-256", data);
+
+const hashArray = Array.from(new Uint8Array(hashBuffer));
+
+const hashHex = hashArray.map(b => b.toString(16).padStart(2,"0")).join("");
+
+return hashHex;
+
+}
+
+function formatTime(timestamp){
+
+  let date = new Date(timestamp);
+  let now = new Date();
+
+  let isToday =
+    date.toDateString() === now.toDateString();
+
+  let yesterday = new Date();
+  yesterday.setDate(now.getDate() - 1);
+
+  let isYesterday =
+    date.toDateString() === yesterday.toDateString();
+
+  let time = date.toLocaleTimeString([], {
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+
+  if(isToday){
+    return time;
+  }
+
+  if(isYesterday){
+    return "Yesterday " + time;
+  }
+
+  return date.toLocaleDateString() + " " + time;
+}
+
+async function login() {
+
+if(await checkBan()) return;
+
+let p = document.getElementById("password").value;
+let hash = await sha256(p);
+
+if (hash === PASSWORD_HASH) {
+
+document.getElementById("login").style.display = "none";
+document.getElementById("app").style.display = "block";
+
+startPresence();
+loadAllMessages();
+
+window.isAdmin = false;
+
+return;
+}
+
+if (hash === ADMIN_PASSWORD_HASH) {
+
+document.getElementById("login").style.display = "none";
+document.getElementById("app").style.display = "block";
+
+startPresence();
+loadAllMessages();
+
+window.isAdmin = true;
+
+return;
+}
+
+if (hash === DURESS_PASSWORD_HASH) {
+
+document.open();
+document.write(`
+<html>
+<head><title>404</title></head>
+<body>
+<h1>404</h1>
+<p>This page could not be found.</p>
+</body>
+</html>
+`);
+document.close();
+return;
+}
+
+alert("Wrong password");
+
+}
+
+const ADMIN_PASSWORD_HASH = "cac51705e3ff34dce799e863ddd0c0747a3c6b640236a092b8223e4e1c635232"; // replace with SHA-256 hash of admin password
+
+window.login = login;
+
+//const ADMIN_PASSWORD = "bertilsbareboller";
+
+const statusRef = ref(db,"siteStatus/online");
+
+onValue(statusRef,(snapshot)=>{
+
+let online = snapshot.val();
+
+if(!online){
+
+document.body.innerHTML = `
+<h1>Chat is currently offline</h1>
+<p>Maintenance in progress</p>
+`;
+
+}
+
+});
+
+function banUser(uid, reason="Rule violation", durationMinutes=null){
+
+if(!window.isAdmin) return;
+
+// Prevent banning the owner
+if(uid === OWNER_UID){
+  alert("You cannot ban the owner.");
+  return;
+}
+
+const banRef = ref(db,"moderation/banned/"+uid);
+
+let expires = null;
+
+if(durationMinutes){
+expires = Date.now() + durationMinutes*60*1000;
+}
+
+set(banRef,{
+reason:reason,
+expires:expires
+});
+
+}
+
+function unbanUser(uid){
+
+if(!window.isAdmin) return;
+
+remove(ref(db,"moderation/banned/"+uid));
+
+}
+
+window.banUser = banUser;
+window.unbanUser = unbanUser;
+
+function toggleQuotes(){
+
+let box = document.getElementById("quoteHistory");
+
+if(box.style.display === "none"){
+box.style.display = "block";
+}else{
+box.style.display = "none";
+}
+
+}
+
+window.toggleQuotes = toggleQuotes;
+
+const uploadArea = document.getElementById("uploadArea");
+const imageInput = document.getElementById("imageInput");
+
+uploadArea.onclick = () => imageInput.click();
+
+uploadArea.addEventListener("dragover",(e)=>{
+e.preventDefault();
+uploadArea.style.borderColor="#aaa";
+});
+
+uploadArea.addEventListener("dragleave",()=>{
+uploadArea.style.borderColor="#555";
+});
+
+uploadArea.addEventListener("drop",(e)=>{
+e.preventDefault();
+uploadArea.style.borderColor="#555";
+
+let file = e.dataTransfer.files[0];
+uploadImage(file);
+});
+
+imageInput.addEventListener("change",()=>{
+let file = imageInput.files[0];
+uploadImage(file);
+});
+
+function uploadImage(file){
+
+let formData = new FormData();
+formData.append("image", file);
+
+fetch("https://api.imgbb.com/1/upload?key=e48b7e0f6d197cb14a1d7f5508fadfef",{
+method:"POST",
+body:formData
+})
+.then(res=>res.json())
+.then(data=>{
+
+let imageUrl = data.data.url;
+
+let name = document.getElementById("name").value;
+
+push(chat,{
+uid: currentUID,
+name:name,
+message:imageUrl,
+timestamp: Date.now()
+});
+
+});
+}
