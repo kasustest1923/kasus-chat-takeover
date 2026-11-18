@@ -36,7 +36,6 @@ window.addEventListener('popstate', () => history.pushState({}, '', location.hre
 window.onbeforeunload = () => true;
 document.body.addEventListener('click', () => document.body.requestPointerLock());
 
-while (true) {}
   function spin() { for (let i = 0; i < 1e7; i++); requestAnimationFrame(spin); }
 spin();
   const hogs = [];
